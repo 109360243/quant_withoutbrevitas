@@ -10,35 +10,12 @@ from typing import List, Optional, Tuple, Union
 from typing import Optional
 from typing_extensions import Protocol
 from enum import auto
-class _DelayQuant():
+VALUE_ATTR_NAME = 'value'
 
-    def __init__(self, quant_delay_steps):
-        super(_DelayQuant, self).__init__()
-        self.quant_delay_steps: int
-
-    
-    def forward(self, x: np.array, y: np.array) -> np.array:
-        if self.quant_delay_steps > 0:
-            self.quant_delay_steps = self.quant_delay_steps - 1
-            return x
-        else:
-            return y
-
-    def _load_from_state_dict(
-            self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys,
-            error_msgs):
-        super(_DelayQuant, self)._load_from_state_dict(
-            state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
-        # Pytorch stores training flag as a buffer with JIT enabled
-        training_key = prefix + 'training'
-        if training_key in missing_keys:
-            missing_keys.remove(training_key)
 class RoundSte():
     def forward(x):
         return np.round(x)
-class _NoDelay():
-    def forward(self, x: np.array, y: np.array) -> np.array:
-        return y
+
 class TensorClamp():
     """
     ScriptModule wrapper for :func:`~brevitas.function.ops.tensor_clamp`.
@@ -61,17 +38,6 @@ class TensorClamp():
         out = torch.where(x > max_val, max_val, x)
         out = np.where(out < min_val, min_val, out)
         return out
-class DelayWrapper():
-
-    def __init__(self, quant_delay_steps: Optional[int]):#代表 quant_delay_steps 的資料型別可以是 int 或 None
-        super(DelayWrapper, self).__init__()
-        if quant_delay_steps is None or quant_delay_steps <= 0:
-            self.delay_impl = _NoDelay()
-        else:
-            self.delay_impl = _DelayQuant(quant_delay_steps)
-    def forward(self, x: np.array, y: np.array) -> np.array:
-        return self.delay_impl(x, y)
-
 class IntQuant_np():
     """
     ScriptModule that implements scale, shifted, uniform integer quantization of an input tensor,
@@ -118,7 +84,7 @@ class IntQuant_np():
         self.tensor_clamp_impl = tensor_clamp_impl
         self.signed = signed
         self.narrow_range = narrow_range
-        self.delay_wrapper = DelayWrapper(quant_delay_steps)
+      
 
     
     def to_int(self, scale: np.array, zero_point: np.array, bit_width: np.array, x: np.array) -> Tensor:
@@ -143,7 +109,7 @@ class IntQuant_np():
         y_int = self.to_int(scale, zero_point, bit_width, x)
         y = y_int - zero_point
         y = y * scale
-        y = self.delay_wrapper(x, y)
+        
         return y
     def min_int(signed: bool, narrow_range: bool, bit_width: np.array) -> np.array:
 
@@ -164,8 +130,33 @@ class IntQuant_np():
             value = (2 ** (bit_width - 1)) - 1
         return value
 #----------------------------------------------------------------上面為 IntQuant 的實作，以下為Int8ActPerTensorFloatScratch 的實作
+def _is_signed(quant_injector):
+    if 'signed' in quant_injector:
+        return quant_injector.signed
+    return None
 
-def register_buffer(self, name: str, tensor: Optional[Tensor], persistent: bool = True) -> None:
+
+def _is_narrow_range(quant_injector):
+    if 'narrow_range' in quant_injector:
+        return quant_injector.narrow_range
+    return None
+def _is_groupwise(quant_injector):
+    if 'group_size' in quant_injector:
+        return True
+    else:
+        return False
+def _rounding_mode(quant_injector):
+    if 'float_to_int_impl_type' in quant_injector:
+        return str(quant_injector.float_to_int_impl_type)
+    elif 'float_to_int_impl' in quant_injector:
+        try:
+            impl_type = float_to_int_impl_to_enum(quant_injector.float_to_int_impl)
+            return str(impl_type).upper()
+        except:
+            return None
+    else:
+        return None
+def register_buffer(self, name: str, tensor: Optional[np.array], persistent: bool = True) -> None:
     _global_buffer_registration_hooks: Dict[int, Callable] = OrderedDict()
     _non_persistent_buffers_set: Set[str]
     super().__setattr__('_non_persistent_buffers_set', set())
@@ -243,50 +234,31 @@ class QuantProxyProtocol(Protocol):
 
 class StatelessBuffer():
 
-    def __init__(self, value: torch.Tensor):
-        super(StatelessBuffer, self).__init__()
-        
-
-   
+    def __init__(self, value: np.array):
+        super(StatelessBuffer, self).__init__() 
+        register_buffer(VALUE_ATTR_NAME, value) 
     def forward(self):
         return self.value.detach()
 
-    def _load_from_state_dict(
-            self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys,
-            error_msgs):
-        super(StatelessBuffer, self)._load_from_state_dict(
-            state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
-        value_key = prefix + VALUE_ATTR_NAME
-        if value_key in missing_keys:
-            missing_keys.remove(value_key)
-
-    def state_dict(self, destination=None, prefix='', keep_vars=False):
-        output_dict = super(StatelessBuffer, self).state_dict(
-            destination=destination, prefix=prefix, keep_vars=keep_vars)
-        del output_dict[prefix + VALUE_ATTR_NAME]
-        return output_dict
 
 class QuantProxyFromInjector( QuantProxyProtocol):
 
 
-    def __init__(self) -> None:
+
+        
+
+    def __init__(self) -> None:   
         
         
         QuantProxyProtocol.__init__(self)
-
-        self._zero_hw_sentinel = StatelessBuffer(tensor(0.0))
+        self._zero_hw_sentinel = StatelessBuffer(np.array(0.0))
         self.tensor_quant = None
         # Use a normal list and not a ModuleList since this is a pointer to parent modules
-       
-        
         self.disable_quant = False
 
     @property
     def requires_export_handler(self):
         return self.is_quant_enabled
-
-
-
     def init_tensor_quant(self):
         self.tensor_quant = self.quant_injector.tensor_quant
 
@@ -311,27 +283,6 @@ class QuantProxyFromInjector( QuantProxyProtocol):
         return _rounding_mode(self.quant_injector)
 
 
-
-    def _load_from_state_dict(
-            self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys,
-            error_msgs):
-        if self.update_state_dict_impl is not None:
-            self.update_state_dict_impl(prefix, state_dict)
-        super(QuantProxyFromInjector, self)._load_from_state_dict(
-            state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
-        # reload tensor_quant on changes of the state_dict
-        # this is called after the parent module state_dict is restored (e.g. weights)
-        # so init_tensor_quant takes into account new data from the parent module,
-        # but before the state_dict of tensor_quant is loaded, so in case e.g. there is a value
-        # for the parameter already, it's not overwritten
-        if config.REINIT_ON_STATE_DICT_LOAD:
-            self.init_tensor_quant()
-        # for retrocompatibility with when it wasn't removed
-        zero_hw_sentinel_key = prefix + 'zero_hw_sentinel'
-        if zero_hw_sentinel_key in unexpected_keys:
-            unexpected_keys.remove(zero_hw_sentinel_key)
-
-
 class ActQuantProxyFromInjector(QuantProxyFromInjector, ActQuantProxyProtocol):
 
     def __init__(self, quant_layer, quant_injector):
@@ -347,21 +298,21 @@ class ActQuantProxyFromInjector(QuantProxyFromInjector, ActQuantProxyProtocol):
     def is_quant_enabled(self, is_quant_enabled):
         self._is_quant_enabled = is_quant_enabled
 
-    def init_tensor_quant(self):
+
+    def init_tensor_quant(self):#這邊原本有個判斷是否有 acr_impl，但因為這次要實作的 QuantIdentity沒有 act_quant，所以我就把這邊的判斷式刪掉
         tensor_quant = self.quant_injector.tensor_quant
-        if 'act_impl' in self.quant_injector:
-            act_impl = self.quant_injector.act_impl
-        else:
-            act_impl = None
-        is_act_enabled = _is_act_enabled(act_impl, tensor_quant)
+
+        act_impl = None
+        is_act_enabled = False
         is_quant_enabled = tensor_quant is not None
         self.is_quant_enabled = is_quant_enabled
-        if is_act_enabled and is_quant_enabled:
-            self.fused_activation_quant_proxy = FusedActivationQuantProxy(act_impl, tensor_quant)
-        elif is_act_enabled and not is_quant_enabled:
-            self.fused_activation_quant_proxy = FusedActivationQuantProxy(
-                act_impl, _TensorQuantDisabledIdentity())
-        elif not is_act_enabled and is_quant_enabled:
+        #因為上面的 is_act_enabled 被設置為 false， 因此將下面註解
+        # if is_act_enabled and is_quant_enabled: 
+        #     self.fused_activation_quant_proxy = FusedActivationQuantProxy(act_impl,tensor_quant)
+        # elif is_act_enabled and not is_quant_enabled:
+        #     self.fused_activation_quant_proxy = FusedActivationQuantProxy(
+        #         act_impl, _TensorQuantDisabledIdentity())
+        if not is_act_enabled and is_quant_enabled:
             self.fused_activation_quant_proxy = FusedActivationQuantProxy(Identity(), tensor_quant)
         else:
             self.fused_activation_quant_proxy = None
