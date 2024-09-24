@@ -10,6 +10,8 @@ from typing import List, Optional, Tuple, Union
 from typing import Optional
 from typing_extensions import Protocol
 from enum import auto
+
+from brevitas.inject import BaseInjector as Injector
 VALUE_ATTR_NAME = 'value'
 
 class RoundSte():
@@ -156,6 +158,13 @@ def _rounding_mode(quant_injector):
             return None
     else:
         return None
+def _update_state_dict_impl(quant_injector):
+    try:
+        impl = quant_injector.update_state_dict_impl
+    except:
+        impl = None
+    return impl
+
 def register_buffer(self, name: str, tensor: Optional[np.array], persistent: bool = True) -> None:
     _global_buffer_registration_hooks: Dict[int, Callable] = OrderedDict()
     _non_persistent_buffers_set: Set[str]
@@ -241,16 +250,18 @@ class StatelessBuffer():
         return self.value.detach()
 
 
-class QuantProxyFromInjector( QuantProxyProtocol):
+class QuantProxyFromInjector(QuantProxyProtocol):
 
 
 
         
-
-    def __init__(self) -> None:   
+    def __init__(self,  quant_injector: Injector) -> None:
         
         
         QuantProxyProtocol.__init__(self)
+        self.update_state_dict_impl = _update_state_dict_impl(quant_injector)
+        self.quant_injector = quant_injector
+        self.quant_injector = quant_injector.let(proxy_module=self)
         self._zero_hw_sentinel = StatelessBuffer(np.array(0.0))
         self.tensor_quant = None
         # Use a normal list and not a ModuleList since this is a pointer to parent modules
@@ -337,35 +348,35 @@ class ActQuantProxyFromInjector(QuantProxyFromInjector, ActQuantProxyProtocol):
         scale = self.__call__(self._zero_hw_sentinel()).bit_width
         return scale
 
-    def forward(self, x: Union[Tensor, QuantTensor]) -> QuantTensor:
+    def forward(self, x: Union[Tensor, np.array]) -> np.array:
         if self.fused_activation_quant_proxy is not None:
             y = x
-            if isinstance(y, QuantTensor):
+            if isinstance(y, np.array):
                 y = y.value
-            if self.export_mode:
-                y = self.fused_activation_quant_proxy.activation_impl(y)
-                y = self.export_handler(y)
-            elif not self.is_quant_enabled:
+            # if self.export_mode:
+            #     y = self.fused_activation_quant_proxy.activation_impl(y)
+            #     y = self.export_handler(y)
+            if not self.is_quant_enabled:
                 y = self.fused_activation_quant_proxy.activation_impl(y)
             else:
                 y = self.fused_activation_quant_proxy(y)
             # If y is an empty QuantTensor, we need to check if this is a passthrough proxy,
             # otherwise return an empty QuantTensor
             if isinstance(y, tuple) and not any(map(lambda f: f is None, y)):
-                return QuantTensor(*y, signed=self.is_signed, training=self.training)
+                return np.array(*y, signed=self.is_signed, training=self.training)
             elif self.is_passthrough_act:  # preserve scale/zp/bit/sign even without output quant
                 if isinstance(y, tuple):
                     y = y[0]
-                return QuantTensor(y, x.scale, x.zero_point, x.bit_width, x.signed, self.training)
+                return np.array(y, x.scale, x.zero_point, x.bit_width, x.signed, self.training)
             else:
                 if isinstance(y, tuple):
                     y = y[0]
-                return QuantTensor(y, training=self.training)
+                return np.array(y, training=self.training)
         else:
-            if isinstance(x, QuantTensor):  # passthrough
+            if isinstance(x, np.array):  # passthrough
                 return x
             else:
-                return QuantTensor(x, training=self.training)
+                return np.array(x, training=self.training)
 class ActQuantSolver(SolveActTensorQuantFromEnum):
      proxy_class = ActQuantProxyFromInjector
 
