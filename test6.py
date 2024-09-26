@@ -1,0 +1,1 @@
+from brevitas.nn import QuantLinear

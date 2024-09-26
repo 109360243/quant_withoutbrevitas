@@ -43,7 +43,7 @@ class Int2WeightPerTensorFloatScratch(Int8WeightPerTensorFloatScratch):
 
 class Int8ActPerTensorFloatScratch(ActQuantSolver):
     quant_type = QuantType.INT # integer quantization-----------------------------------------------------------------#SolveActTensorQuantFromEnum
-    bit_width_impl_type = auto() # constant bit width-------------------------------------------------#SolveBitWidthImplFromEnum
+    bit_width_impl_type = BitWidthImplType.CONST # constant bit width-------------------------------------------------#SolveBitWidthImplFromEnum
     float_to_int_impl_type = FloatToIntImplType.ROUND # round to nearest ---------------------------------------------#SolveTensorQuantFloatToIntImplFromEnum 
     scaling_impl_type = ScalingImplType.PARAMETER_FROM_STATS # scale is a parameter initialized from statistics-------#SolveActScalingImplFromEnum
     scaling_stats_op = StatsOp.PERCENTILE # scale statistics is a percentile of the abs value ------------------------#SolveScalingStatsOpFromEnum
